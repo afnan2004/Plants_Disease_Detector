@@ -1,90 +1,66 @@
-from flask import Flask, render_template,request,redirect,send_from_directory,url_for
+import os
+import sys
+import urllib.request
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import cv2
 import numpy as np
-import json
-import uuid
-import tensorflow as tf
+from flask import Flask, render_template, request
+from tensorflow.keras.models import load_model
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-model = tf.keras.models.load_model("models/trained_model.keras")
-label = ['Apple___Apple_scab',
- 'Apple___Black_rot',
- 'Apple___Cedar_apple_rust',
- 'Apple___healthy',
- 'Background_without_leaves',
- 'Blueberry___healthy',
- 'Cherry___Powdery_mildew',
- 'Cherry___healthy',
- 'Corn___Cercospora_leaf_spot Gray_leaf_spot',
- 'Corn___Common_rust',
- 'Corn___Northern_Leaf_Blight',
- 'Corn___healthy',
- 'Grape___Black_rot',
- 'Grape___Esca_(Black_Measles)',
- 'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)',
- 'Grape___healthy',
- 'Orange___Haunglongbing_(Citrus_greening)',
- 'Peach___Bacterial_spot',
- 'Peach___healthy',
- 'Pepper,_bell___Bacterial_spot',
- 'Pepper,_bell___healthy',
- 'Potato___Early_blight',
- 'Potato___Late_blight',
- 'Potato___healthy',
- 'Raspberry___healthy',
- 'Soybean___healthy',
- 'Squash___Powdery_mildew',
- 'Strawberry___Leaf_scorch',
- 'Strawberry___healthy',
- 'Tomato___Bacterial_spot',
- 'Tomato___Early_blight',
- 'Tomato___Late_blight',
- 'Tomato___Leaf_Mold',
- 'Tomato___Septoria_leaf_spot',
- 'Tomato___Spider_mites Two-spotted_spider_mite',
- 'Tomato___Target_Spot',
- 'Tomato___Tomato_Yellow_Leaf_Curl_Virus',
- 'Tomato___Tomato_mosaic_virus',
- 'Tomato___healthy']
+app.config['UPLOAD_FOLDER'] = 'static/uploads'
 
-with open("plant_disease.json",'r') as file:
-    plant_disease = json.load(file)
+MODEL_PATH = "deepfake_model.h5"
+MODEL_URL = os.getenv("HF_MODEL_URL")
 
-# print(plant_disease[4])
+# Download model if not exists
+if not os.path.exists(MODEL_PATH):
+    print("Downloading model from Hugging Face...")
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    print("Model downloaded")
 
-@app.route('/uploadimages/<path:filename>')
-def uploaded_images(filename):
-    return send_from_directory('./uploadimages', filename)
+# Load model
+model = load_model(MODEL_PATH)
+print("Model loaded successfully")
 
-@app.route('/',methods = ['GET'])
-def home():
-    return render_template('home.html')
+def preprocess_image(image_path, target_size=(128, 128)):
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError("Image could not be read")
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, target_size)
+    img = img.astype("float32") / 255.0
+    return np.expand_dims(img, axis=0)
 
-def extract_features(image):
-    image = tf.keras.utils.load_img(image,target_size=(160,160))
-    feature = tf.keras.utils.img_to_array(image)
-    feature = np.array([feature])
-    return feature
-
-def model_predict(image):
-    img = extract_features(image)
-    prediction = model.predict(img)
-    # print(prediction)
-    prediction_label = plant_disease[prediction.argmax()]
-    return prediction_label
-
-@app.route('/upload/',methods = ['POST','GET'])
-def uploadimage():
+@app.route("/", methods=["GET", "POST"])
+def index():
     if request.method == "POST":
-        image = request.files['img']
-        temp_name = f"uploadimages/temp_{uuid.uuid4().hex}"
-        image.save(f'{temp_name}_{image.filename}')
-        print(f'{temp_name}_{image.filename}')
-        prediction = model_predict(f'./{temp_name}_{image.filename}')
-        return render_template('home.html',result=True,imagepath = f'/{temp_name}_{image.filename}', prediction = prediction )
-    
-    else:
-        return redirect('/')
-        
-    
+        file = request.files.get("image")
+        if not file or file.filename == "":
+            return render_template("index.html", error="No file selected")
+
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+
+        input_data = preprocess_image(filepath)
+        prediction = model.predict(input_data)[0][0]
+
+        label = "REAL" if prediction >= 0.5 else "FAKE"
+        confidence = prediction if prediction >= 0.5 else 1 - prediction
+
+        return render_template(
+            "index.html",
+            filename=filename,
+            label=label,
+            confidence=f"{confidence * 100:.2f}%"
+        )
+
+    return render_template("index.html")
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
